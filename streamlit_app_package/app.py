@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 from pathlib import Path
 
-# Import your modules
 from models.forecast_model import (
     FEATURE_COLUMNS,
     prepare_product_data,
@@ -18,11 +17,9 @@ from models.inventory import (
 from utils.exporter import create_results_table
 
 st.set_page_config(page_title="HD Smart Stock System", layout="wide")
-
 st.title("📦 HD Smart Stock System")
 st.caption("Two Core AI Subsystems: Random Forest Demand Forecasting + Fuzzy Logic Reorder Intelligence")
 
-# ✅ FIXED PATH (important)
 BASE_DIR = Path(__file__).resolve().parent
 DATA_FILE = BASE_DIR / "data" / "data_test.csv"
 
@@ -32,52 +29,51 @@ def load_data():
     df["Date"] = pd.to_datetime(df["Date"])
     return df
 
-# Load data
 df = load_data()
 
-# Sidebar
 st.sidebar.header("System Controls")
 product_options = df["StockCode"].dropna().astype(str).unique().tolist()
-selected_product = st.sidebar.selectbox("Select Product", product_options)
+product_options = sorted(product_options)
+selected_code = st.sidebar.selectbox("Select Product (StockCode)", product_options, index=0)
 
-# Filter data
-product_df = df[df["StockCode"].astype(str) == selected_product]
+product_names = df.loc[df["StockCode"].astype(str) == selected_code, "ProductName"].dropna().unique().tolist()
+product_name = product_names[0] if product_names else "Unknown Product"
 
-# Prepare data
-prepared_df = prepare_product_data(product_df)
+forecast_horizon = st.sidebar.slider("Forecast Horizon (days)", 3, 30, 7)
+lead_time = st.sidebar.slider("Supplier Lead Time (days)", 1, 30, 7)
+current_stock = st.sidebar.number_input("Current Stock On Hand", min_value=0, max_value=100000, value=100, step=10)
+service_level = st.sidebar.selectbox("Service Level", [0.90, 0.95, 0.99], index=1)
 
-# Train model
-model, metrics = train_evaluate_model(prepared_df)
+# correct call
+product_df = prepare_product_data(df, selected_code)
 
-# Forecast
-forecast_df = build_future_forecast(model, prepared_df)
+if product_df.empty or len(product_df) < 40:
+    st.error("Selected product does not have enough clean records for modelling.")
+    st.stop()
 
-# Inventory calculations
-avg_demand = prepared_df["Quantity"].mean()
-std_demand = prepared_df["Quantity"].std()
+results = train_evaluate_model(product_df)
+future_df, future_forecast = build_future_forecast(product_df, results["model"], forecast_horizon)
 
-safety_stock = calculate_safety_stock(avg_demand, std_demand)
-reorder_point = calculate_reorder_point(avg_demand, safety_stock)
-stock_status = classify_stock_status(avg_demand, reorder_point)
+avg_forecast = float(future_forecast["PredictedDemand"].mean())
+demand_std = float(product_df["DailyDemand"].std())
+safety_stock = calculate_safety_stock(demand_std, lead_time, service_level)
+reorder_point = calculate_reorder_point(avg_forecast, lead_time, safety_stock)
+decision, score = fuzzy_reorder(current_stock, avg_forecast, lead_time, safety_stock, reorder_point)
+stock_status = classify_stock_status(current_stock, reorder_point, safety_stock)
 
-# Fuzzy logic reorder decision
-reorder_decision = fuzzy_reorder(avg_demand, std_demand)
-
-# Results
-st.subheader("📊 Forecast Results")
-st.dataframe(forecast_df)
-
-st.subheader("📦 Inventory Insights")
-st.write(f"Safety Stock: {safety_stock}")
-st.write(f"Reorder Point: {reorder_point}")
-st.write(f"Stock Status: {stock_status}")
-st.write(f"Fuzzy Reorder Decision: {reorder_decision}")
-
-# Export
-results_table = create_results_table(forecast_df)
-st.download_button(
-    label="Download Results",
-    data=results_table.to_csv(index=False),
-    file_name="forecast_results.csv",
-    mime="text/csv",
+summary_results = create_results_table(
+    selected_code,
+    product_name,
+    current_stock,
+    lead_time,
+    forecast_horizon,
+    avg_forecast,
+    safety_stock,
+    reorder_point,
+    decision,
+    score,
+    results
 )
+
+st.subheader("HD Results Table")
+st.dataframe(summary_results, use_container_width=True)
